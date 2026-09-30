@@ -12,8 +12,9 @@ sidebar. Working directory:
 /Users/msalinas/CMCC Dropbox/Mario Salinas/myData/code/_utils/git_graph_explorer
 ```
 
-**Read `README.md` there first** — it is thorough and current (200 lines:
-usage, HTTP API, the lane algorithm, the git traps, security, limitations).
+**Read `README.md` there first** — it is thorough and current (243 lines:
+usage, the folder picker, HTTP API, the lane algorithm, the git traps,
+security, limitations).
 This file covers only what the README deliberately leaves out: why things are
 the way they are, and what is left to do.
 
@@ -35,15 +36,16 @@ Nothing is known broken. Everything the user asked for is built and tested:
 - search over commit id / subject / body / author / ref name, with match
   counter, next/prev cycling, dim-vs-filter modes
 - branch & tag picker (draws only — never checks out)
+- **Browse…** button opening the operating system's own folder dialog
 - virtualised list, draggable splitter, keyboard nav, recents in `localStorage`
 
 | file | lines | |
 |---|---|---|
-| `server.py` | 449 | stdlib-only HTTP server, all git plumbing |
-| `app.js` | 859 | lane layout, virtual list, search, diff rendering |
+| `server.py` | 594 | stdlib-only HTTP server, git plumbing, folder dialog |
+| `app.js` | 882 | lane layout, virtual list, search, diff rendering |
 | `app.css` | 399 | dark theme; row/lane geometry in `:root` |
-| `index.html` | 59 | the page |
-| `README.md` | 200 | full documentation |
+| `index.html` | 60 | the page |
+| `README.md` | 243 | full documentation |
 | `environment.yml` | 27 | optional conda env |
 
 Run it with `python3 server.py` → <http://127.0.0.1:8787>.
@@ -72,6 +74,28 @@ Run it with `python3 server.py` → <http://127.0.0.1:8787>.
   topology stays readable; `hide non-matching` switches to filtering.
 - **Merge commits are diffed against their first parent**, like `git show`, and
   the UI labels it *vs first parent*.
+
+## The folder picker — the subtle bit
+
+`/api/pick` exists because a browser physically cannot hand over an absolute
+path: `webkitdirectory` and `showDirectoryPicker()` expose only the folder's
+name. The server opens the real dialog instead and reports the path back.
+
+The non-obvious part, which took a round of debugging: on this machine
+`osascript`'s `choose folder` sometimes returns AppleScript error **-128
+instantly** — the very same code a genuine user cancel produces. The first
+implementation therefore reported a cancel the user never made and never fell
+through to the working `tkinter` dialog. The fix is `MIN_DIALOG_SECONDS = 0.4`
+in `server.py`: a "cancel" faster than that means the tool could not display,
+so the next picker in the chain is tried. Don't remove it.
+
+Also note macOS spells it "User cancel**led**", not "canceled" — the matcher
+accepts both plus the `-128` code.
+
+Empirically: the native Finder dialog *does* work when spawned by the server
+process, but fails instantly when `osascript` is run straight from a
+non-interactive tool shell. So testing the picker from a script is misleading;
+click the button in a browser to judge it.
 
 ## The one bug found and fixed — do not regress it
 
@@ -170,6 +194,12 @@ for a minimal app.
   independently against the raw log).
 - Error paths: `/tmp` → "is not a git repository."; a missing folder → "is not a
   folder."; relative paths resolve against the server's cwd.
+- Picker: all three response shapes exercised in the browser — an error shows a
+  banner and leaves the loaded repo alone, `{"cancelled":true}` changes nothing
+  silently, and a returned path switches repositories completely (44 commits on
+  `main` → 2 on `trunk`, branch list repopulated, `state.ref` reset). The lock
+  rejects a second click with "A folder dialog is already open." and the app
+  stays responsive while a dialog is up.
 - Security: the `Host`-header rebinding guard, static-file whitelist (traversal
   → 404), and option-injection rejection (`sha`/`ref` values like
   `--output=/tmp/pwned`) all hold.

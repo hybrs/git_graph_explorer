@@ -15,6 +15,7 @@ var LANE_COLORS = [
 var $ = function (id) { return document.getElementById(id); };
 var el = {
   repoPath: $('repoPath'), recents: $('recents'), openBtn: $('openBtn'),
+  browseBtn: $('browseBtn'),
   reloadBtn: $('reloadBtn'), repoMeta: $('repoMeta'), banner: $('banner'),
   branchSel: $('branchSel'),
   search: $('search'), matchCount: $('matchCount'),
@@ -728,6 +729,28 @@ function showRef(ref) {
 }
 
 /* ---------------------------------------------------------------- events */
+
+/* Ask the server to open the operating system's own folder dialog. A browser
+   cannot tell us an absolute path by itself - a file input or
+   showDirectoryPicker() only ever exposes the folder's name - so the server,
+   which runs on this machine, puts up the dialog for us. */
+el.browseBtn.onclick = function () {
+  var label = el.browseBtn.innerHTML;
+  el.browseBtn.disabled = true;
+  el.browseBtn.textContent = 'Choose\u2026';
+  banner('A folder dialog is open - it may be behind this window.', 'info');
+  api('/api/pick', { start: el.repoPath.value || '' }).then(function (data) {
+    banner('');
+    if (data.cancelled || !data.path) return;
+    el.repoPath.value = data.path;
+    openRepo(data.path);
+  }).catch(function (err) {
+    banner(err.message);
+  }).then(function () {
+    el.browseBtn.disabled = false;
+    el.browseBtn.innerHTML = label;
+  });
+};
 
 el.openBtn.onclick = function () { openRepo(el.repoPath.value); };
 el.repoPath.onkeydown = function (e) {

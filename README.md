@@ -36,8 +36,10 @@ required.
 python3 server.py
 ```
 
-That opens <http://127.0.0.1:8787> in your browser. Type the folder of a git
-repository in the box at the top and press **Open**.
+That opens <http://127.0.0.1:8787> in your browser. Press **Browse…** to pick a
+folder in the usual file dialog, or type the path in the box and press
+**Open**. Picking any subfolder of a repository works — git resolves it to the
+repository root.
 
 To skip the typing, name the repository up front:
 
@@ -50,6 +52,7 @@ python3 server.py --repo ./visir-brain
 | `--port 8787` | port to listen on |
 | `--repo PATH` | folder to preselect in the UI |
 | `--no-browser` | do not open a browser window |
+| `--no-picker` | disable the native folder dialog |
 | `-v` | log each request to stderr |
 
 `server.py` holds no state, so editing `index.html`, `app.css` or `app.js` only
@@ -59,6 +62,8 @@ needs a browser refresh. Editing `server.py` needs a restart.
 
 | | |
 |---|---|
+| **Browse…** | pick a folder in the operating system's own file dialog |
+| Path box | type or paste a path; remembers what you have opened |
 | Branch picker | choose one branch or tag, or **All branches** |
 | Click a commit | expands its changed files underneath, GitLens-style |
 | Click a file | shows its unified diff on the right |
@@ -95,7 +100,43 @@ needed an idx-v2 parser, `OFS_DELTA`/`REF_DELTA` resolution and its own diff
 algorithm, all to reimplement what git already does correctly.
 
 `server.py` is therefore the smallest possible bridge: standard library only,
-it shells out to `git` and serves the four static files.
+it shells out to `git` and serves the three static files.
+
+## How **Browse…** works, and why it needs the server
+
+A web page cannot tell anyone which folder you chose. `<input type="file"
+webkitdirectory>` and `showDirectoryPicker()` both hand JavaScript the folder's
+*name* and the paths of files *relative* to it — never the absolute path the
+server needs. That is a deliberate sandbox rule, not an oversight.
+
+So `/api/pick` asks the server, which runs on your machine, to open the real
+dialog and report back the path. It tries, in order:
+
+| platform | dialog |
+|---|---|
+| macOS | `osascript` → AppleScript `choose folder` (the Finder dialog) |
+| Windows | PowerShell `FolderBrowserDialog` |
+| Linux | `zenity`, then `kdialog` |
+| anywhere | `tkinter.filedialog` — ships with Python, so it always exists |
+
+Two details make that chain trustworthy:
+
+- **A dialog that cannot open is not a cancel.** Some machines make
+  `osascript` fail instantly with AppleScript's `-128`, which is the same code
+  a real cancel produces. A "cancel" arriving in under
+  `MIN_DIALOG_SECONDS` (0.4 s) is therefore treated as *this tool does not
+  work here* and the next one is tried; nobody dismisses a dialog that fast.
+  Without this the fallback chain would never run.
+- **Tk runs in a subprocess**, never in the server process: on macOS Tk demands
+  the main thread, and requests are served on worker threads.
+
+Only one dialog can be open at a time, the rest of the app keeps working while
+it is open, and cancelling is silent — no error, nothing changed.
+
+Since the dialog appears on whatever machine runs `server.py`, **Browse…** is
+only useful when that is your own desktop. Over SSH, or in a container, use the
+path box (or `--no-picker` to hide the button's behaviour entirely). Note also
+that the dialog can open *behind* the browser window.
 
 ## Layout
 
@@ -122,6 +163,7 @@ Errors come back as `{"error": "a sentence you can show a user"}` with status
 | endpoint | returns |
 |---|---|
 | `/api/default` | `{path}` — the `--repo` folder, if one was given |
+| `/api/pick` | `{path, via}`, or `{cancelled: true}`; opens the native folder dialog. Takes `start` |
 | `/api/repo` | `{root, name, branch, head, total}` |
 | `/api/refs` | `{refs: [{name, kind, sha, date, current}]}`, `kind` is `local`/`remote`/`tag` |
 | `/api/log` | `{commits, skip, limit, ref, has_more}`; takes `limit`, `skip`, `ref` |
@@ -186,7 +228,7 @@ narrow:
 - git is always invoked with an argument list, never `shell=True`;
 - commit ids and ref names are validated, so a value like `--output=/tmp/x`
   cannot be read as an option, and `--` precedes user-supplied paths;
-- static files come from a fixed whitelist of four names, so no path traversal;
+- static files come from a fixed whitelist of names, so no path traversal;
 - each git call has a timeout.
 
 ## Known limitations
@@ -195,6 +237,7 @@ narrow:
   change colour where branches converge. The lines stay continuous and correct;
   it is cosmetic.
 - No working-tree or staged view — committed history only.
+- **Browse…** needs a desktop on the machine running the server; see above.
 - Search only covers loaded commits (see **Load older commits** above).
 - Single-file diffs only; there is no whole-commit combined patch view.
 - Per-file diffs are capped at 400 KB, and the UI says so when it truncates.

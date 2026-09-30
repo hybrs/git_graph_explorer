@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -29,6 +30,7 @@ STATIC = {
 }
 
 GIT_TIMEOUT = 60        # seconds per git invocation
+PICK_TIMEOUT = 300      # seconds to leave the folder dialog open
 MAX_PATCH = 400 * 1024  # bytes of patch text sent to the browser
 US = "\x1f"             # field separator inside a log record
 
@@ -317,6 +319,135 @@ def read_diff(repo, sha, path):
     return {"patch": patch, "truncated": truncated}
 
 
+class PickCancelled(Exception):
+    """The user closed the folder dialog without choosing anything."""
+
+
+class PickerUnavailable(Exception):
+    """A dialog tool exited at once, so it never managed to show anything."""
+
+
+# No human dismisses a dialog this fast. A "cancel" that arrives sooner means
+# the tool could not display at all (osascript does exactly this on some
+# machines, reporting -128 immediately), so we move on to the next one rather
+# than reporting a cancel the user never made.
+MIN_DIALOG_SECONDS = 0.4
+
+# Only one dialog at a time, however many times the button is clicked.
+_pick_lock = threading.Lock()
+
+# Run Tk in a subprocess, never in-process: on macOS Tk insists on the main
+# thread, and these requests are served on worker threads.
+_TK_PICKER = (
+    "import sys, tkinter, tkinter.filedialog as fd\n"
+    "start = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+    "r = tkinter.Tk(); r.withdraw(); r.update()\n"
+    "p = fd.askdirectory(title='Choose a git repository', mustexist=True,\n"
+    "                    initialdir=start or None)\n"
+    "r.destroy()\n"
+    "print(p or '')\n"
+)
+
+
+def _run_picker(cmd):
+    """Run one dialog tool. Returns the chosen folder, or raises."""
+    began = time.monotonic()
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          timeout=PICK_TIMEOUT)
+    elapsed = time.monotonic() - began
+    out = proc.stdout.decode("utf-8", "replace").strip()
+    err = proc.stderr.decode("utf-8", "replace").strip()
+
+    if proc.returncode != 0:
+        # Cancelling is normal, not a failure: AppleScript reports -128 (and
+        # spells it "User cancelled", not "canceled"), while zenity and
+        # kdialog just exit non-zero with nothing on stdout.
+        low = err.lower()
+        looks_cancelled = ("-128" in err or "user cancel" in low
+                           or "cancelled" in low or not err)
+        if not looks_cancelled:
+            raise GitError(err)
+        if elapsed < MIN_DIALOG_SECONDS:
+            raise PickerUnavailable(err or "exited immediately")
+        raise PickCancelled()
+
+    if not out:
+        if elapsed < MIN_DIALOG_SECONDS:
+            raise PickerUnavailable("exited immediately with no answer")
+        raise PickCancelled()
+    return out.rstrip("/") or "/"
+
+
+def _pickers(start):
+    """The folder dialogs worth trying on this machine, best first."""
+    found = []
+    if sys.platform == "darwin":
+        script = 'choose folder with prompt "Choose a git repository"'
+        if start:
+            script += ' default location (POSIX file "%s")' % start.replace('"', '')
+        found.append(("osascript",
+                      ["osascript", "-e", "POSIX path of (" + script + ")"]))
+
+    elif sys.platform == "win32":
+        ps = (
+            "Add-Type -AssemblyName System.Windows.Forms;"
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+            "$d.Description = 'Choose a git repository';"
+            + ("$d.SelectedPath = '%s';" % start.replace("'", "") if start else "")
+            + "if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }"
+        )
+        for exe in ("powershell", "pwsh"):
+            found.append((exe, [exe, "-NoProfile", "-NonInteractive",
+                                "-Command", ps]))
+
+    else:
+        found.append(("zenity",
+                      ["zenity", "--file-selection", "--directory",
+                       "--title=Choose a git repository"]
+                      + (["--filename=" + start.rstrip("/") + "/"] if start else [])))
+        found.append(("kdialog",
+                      ["kdialog", "--getexistingdirectory",
+                       start or os.path.expanduser("~")]))
+
+    # Always last, and the only one needing no native tooling: tkinter ships
+    # with Python, so it works wherever there is a display at all.
+    found.append(("tkinter", [sys.executable, "-c", _TK_PICKER, start]))
+    return found
+
+
+def pick_folder(start=""):
+    """Open the operating system's own folder dialog and return the choice.
+
+    This is the only way a browser can hand over a real absolute path: a file
+    input or showDirectoryPicker() only ever exposes the folder's name. The
+    dialog opens on the machine running this server, and nothing comes back
+    unless someone actually picks a folder in it.
+
+    Returns (path, which_tool). Raises PickCancelled if the dialog was
+    dismissed, or GitError if no dialog could be shown at all.
+    """
+    if not _pick_lock.acquire(blocking=False):
+        raise GitError("A folder dialog is already open.")
+    try:
+        if start and not os.path.isdir(start):
+            start = ""
+        tried = []
+        for name, cmd in _pickers(start):
+            try:
+                return _run_picker(cmd), name
+            except FileNotFoundError:
+                tried.append("%s (not installed)" % name)
+            except PickerUnavailable as exc:
+                tried.append("%s (%s)" % (name, exc))
+            except subprocess.TimeoutExpired:
+                raise GitError("The folder dialog was left open too long.")
+        raise GitError(
+            "No folder dialog could be opened on this machine, so please type "
+            "or paste the path instead. Tried: " + "; ".join(tried))
+    finally:
+        _pick_lock.release()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "GitGraphExplorer"
     protocol_version = "HTTP/1.1"
@@ -377,6 +508,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"path": self.server.default_repo or ""})
                 return
 
+            if url.path == "/api/pick":
+                if self.server.no_picker:
+                    raise GitError("The folder dialog is switched off "
+                                   "(--no-picker). Type the path instead.")
+                try:
+                    path, via = pick_folder(arg("start"))
+                    self.send_json({"path": path, "via": via})
+                except PickCancelled:
+                    self.send_json({"cancelled": True})
+                return
+
             repo = resolve_repo(arg("path"))
 
             if url.path == "/api/repo":
@@ -416,6 +558,8 @@ def main():
     parser.add_argument("--repo", default=None,
                         help="folder to preselect in the UI")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-picker", action="store_true",
+                        help="disable the native folder dialog")
     parser.add_argument("-v", "--verbose", action="store_true")
     opts = parser.parse_args()
 
@@ -431,6 +575,7 @@ def main():
     server.daemon_threads = True
     server.default_repo = default_repo
     server.verbose = opts.verbose
+    server.no_picker = opts.no_picker
 
     url = "http://127.0.0.1:%d/" % opts.port
     print("Git Graph Explorer -> %s" % url)

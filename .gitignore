@@ -1,3 +1,6 @@
 *.csv
 *.png
-*.md
+*.md  
+*.DS_Store
+!README.md
+!HANDOFF.md
