@@ -1,0 +1,27 @@
+# Git Graph Explorer — reproducible environment.
+#
+# There are NO package dependencies to pin: server.py imports only the Python
+# standard library (argparse, http.server, json, os, re, subprocess, sys,
+# threading, urllib.parse, webbrowser) and the front end has no dependencies
+# at all. A requirements.txt for this project would be empty.
+#
+# What this file is actually for is the two things that do matter:
+#   * python >=3.7  — http.server.ThreadingHTTPServer was added in 3.7
+#   * git           — the server shells out to it for every query
+#
+# Create and use it with:
+#     conda env create -f environment.yml
+#     conda activate git-graph-explorer
+#     python3 server.py
+#
+# Equally fine, since nothing needs installing: any system Python 3.7+ with git
+# on PATH. No virtualenv required.
+
+name: git-graph-explorer
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python>=3.7
+  - git

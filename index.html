@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Git Graph Explorer</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="toolbar">
+  <span class="brand">Git Graph Explorer</span>
+  <input id="repoPath" class="path" type="text" spellcheck="false"
+         placeholder="/path/to/a/git/repository" list="recents">
+  <datalist id="recents"></datalist>
+  <button id="openBtn" class="primary">Open</button>
+  <button id="reloadBtn" title="Reload history (r)" class="icon">&#8635;</button>
+  <select id="branchSel" class="branch" title="Which branch or tag to graph">
+    <option value="">All branches</option>
+  </select>
+  <span id="repoMeta" class="meta"></span>
+</header>
+
+<div class="searchbar">
+  <span class="mag" aria-hidden="true">&#9906;</span>
+  <input id="search" class="search" type="text" spellcheck="false"
+         placeholder="Search commit id, message or author  ( / )">
+  <span id="matchCount" class="matchcount"></span>
+  <button id="prevMatch" class="icon" title="Previous match (shift+enter)">&#8249;</button>
+  <button id="nextMatch" class="icon" title="Next match (enter)">&#8250;</button>
+  <label class="toggle"><input type="checkbox" id="filterOnly"> hide non-matching</label>
+</div>
+
+<div id="banner" class="banner" hidden></div>
+
+<main class="panes">
+  <section class="pane left" id="leftPane">
+    <div id="scroller" class="scroller" tabindex="0">
+      <div id="spacer" class="spacer"></div>
+      <div id="rows" class="rows"></div>
+    </div>
+    <div id="moreWrap" class="morewrap" hidden>
+      <button id="moreBtn">Load older commits</button>
+    </div>
+  </section>
+
+  <div id="splitter" class="splitter" title="Drag to resize"></div>
+
+  <section class="pane right" id="right">
+    <div id="detail" class="detail">
+      <p class="placeholder">Type the folder of a local git repository above and
+        press <b>Open</b>. Then pick a commit on the left.</p>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
