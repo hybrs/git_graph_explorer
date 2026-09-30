@@ -4,8 +4,6 @@ A GitLens-style commit graph for any local git repository, in the browser.
 Plain HTML, CSS and JavaScript — no frameworks, no CDNs, no build step, no
 `pip install`, no network access of any kind. It works fully offline.
 
-![what it looks like](example.png)
-
 ## Requirements
 
 `git`, and **Python 3.7 or newer** — nothing else. There is nothing to install
@@ -44,7 +42,7 @@ repository root.
 To skip the typing, name the repository up front:
 
 ```sh
-python3 server.py --repo ./visir-brain
+python3 server.py --repo <PATH_TO_GIT_REPO>
 ```
 
 | option | |
