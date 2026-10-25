@@ -64,6 +64,8 @@ needs a browser refresh. Editing `server.py` needs a restart.
 | Path box | type or paste a path; remembers what you have opened |
 | Branch picker | choose one branch or tag, or **All branches** |
 | Click a commit | expands its changed files underneath, GitLens-style |
+| Click a folder | collapses / expands it (tree view, see below) |
+| `expand all` · `collapse all` | header of the tree view |
 | Click a file | shows its unified diff on the right |
 | Click the commit again | collapses the file list |
 | Search box | commit id, message, body, author or ref name |
@@ -84,6 +86,14 @@ hollow dot, and `HEAD` gets a ring around it.
 The picker only changes **what is drawn** — it never runs `git checkout`, so
 your working tree and current branch are left exactly as they were. Nothing in
 this tool writes to the repository; every git command it runs is read-only.
+
+When a commit's files span more than one folder they are shown as a tree:
+folders first, then files, both A–Z; a chain of single-child folders is merged
+into one node (`src/core/io`); each folder shows the summed `+`/`−` of its
+text files. Folders start expanded. A folder you collapse stays collapsed in
+other commits until the page is reloaded. Files that all share one folder keep
+the flat list, with the folder in faint text. The diff opened on select is the
+first file in list order.
 
 History is loaded 2000 commits at a time — **Load older commits** appears at
 the bottom of the list when there are more. Search covers the commits that are
@@ -143,9 +153,8 @@ that the dialog can open *behind* the browser window.
 | `server.py` | stdlib-only HTTP server; all the git plumbing |
 | `index.html` | the page |
 | `app.css` | dark theme; the row/lane geometry lives in `:root` |
-| `app.js` | lane layout, virtual list, search, diff rendering |
+| `app.js` | lane layout, virtual list, file tree, search, diff rendering |
 | `environment.yml` | optional conda env; pins the interpreter and git, no packages |
-| `visir-brain/` | an unrelated repository, handy as test data |
 
 `ROW_H`, `FILE_H`, `LANE_W` and `LANE_PAD` at the top of `app.js` **must** match
 the matching custom properties in `app.css` — the virtual list computes pixel
@@ -188,6 +197,14 @@ The list is virtualised — only the visible rows plus a small buffer exist in t
 DOM. Because at most one commit is expanded at a time, row offsets stay O(1):
 `rowTop()` adds the file list's height to every row below the selected one, and
 `posAt()` inverts it.
+
+The file list's height is `state.nodes.length × FILE_H`, where `state.nodes`
+is the list of *visible* rows (tree header, folders, files) built by
+`flatNodes()` from `state.tree` (`buildTree()`, or `null` for a flat list).
+Anything that changes what is visible — toggling a folder, expand/collapse all,
+a new commit's files via `setFiles()` — must rebuild `state.nodes` before
+`render()`, or rows below the expanded commit overlap or leave a gap. Tree rows
+all use `--file-h`, so no new geometry constant exists to keep in sync.
 
 ## Traps worth knowing before you change anything
 
