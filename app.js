@@ -38,6 +38,9 @@ var state = {
   selSha: '',          // selected commit
   selPos: -1,          // its position in view, or -1
   files: null,         // file list of the selected commit, null while loading
+  tree: null,          // files nested by folder, or null for a flat list
+  nodes: [],           // visible rows of the inline file list
+  collapsed: {},       // folder path -> true; kept across commits
   fileErr: '',
   activeFile: '',      // file whose diff is shown
   query: '',
@@ -218,11 +221,104 @@ function graphSvg(c) {
          'stroke-linecap="round">' + parts.join('') + '</svg>';
 }
 
+/* ------------------------------------------------------------- file tree */
+
+function byName(a, b) {
+  var x = a.name.toLowerCase(), y = b.name.toLowerCase();
+  return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+function dirNode(name, path) {
+  return { name: name, path: path, dirs: [], files: [], add: 0, del: 0 };
+}
+
+/* Nest files by folder. Returns null when they all share one folder, since a
+   tree adds nothing then. Folder chains with a single child are merged. */
+function buildTree(files) {
+  var root = dirNode('', ''), folders = {};
+  files.forEach(function (f) {
+    var parts = f.path.split('/'), name = parts.pop(), node = root;
+    folders[parts.join('/')] = true;
+    var chain = [root];
+    parts.forEach(function (p) {
+      var next = null;
+      for (var i = 0; i < node.dirs.length; i++) {
+        if (node.dirs[i].name === p) { next = node.dirs[i]; break; }
+      }
+      if (!next) {
+        next = dirNode(p, node.path ? node.path + '/' + p : p);
+        node.dirs.push(next);
+      }
+      node = next;
+      chain.push(node);
+    });
+    node.files.push({ name: name, f: f });
+    if (!f.binary) {
+      chain.forEach(function (d) { d.add += +f.add || 0; d.del += +f.del || 0; });
+    }
+  });
+  if (Object.keys(folders).length < 2) return null;
+  (function tidy(node) {
+    node.dirs = node.dirs.map(function (d) {
+      while (d.dirs.length === 1 && !d.files.length) {
+        var sub = d.dirs[0];
+        sub.name = d.name + '/' + sub.name;
+        d = sub;
+      }
+      tidy(d);
+      return d;
+    }).sort(byName);
+    node.files.sort(byName);
+  })(root);
+  return root;
+}
+
+/* Rows of the inline list: a header and the tree minus collapsed folders,
+   or one row per file when there is no tree. */
+function flatNodes() {
+  if (!state.tree) {
+    return (state.files || []).map(function (f) {
+      var cut = f.path.lastIndexOf('/');
+      return { kind: 'file', depth: 0, f: f,
+               name: cut < 0 ? f.path : f.path.slice(cut + 1),
+               dir: cut < 0 ? '' : f.path.slice(0, cut) };
+    });
+  }
+  var out = [{ kind: 'head' }];
+  (function walk(node, depth) {
+    node.dirs.forEach(function (d) {
+      out.push({ kind: 'dir', depth: depth, node: d });
+      if (!state.collapsed[d.path]) walk(d, depth + 1);
+    });
+    node.files.forEach(function (e) {
+      out.push({ kind: 'file', depth: depth, f: e.f, name: e.name, dir: '' });
+    });
+  })(state.tree, 0);
+  return out;
+}
+
+function setFiles(files) {
+  state.files = files;
+  state.tree = buildTree(files);
+  state.nodes = flatNodes();
+}
+
+/* Collapse (or expand, when open) every folder of the current tree. */
+function setAllCollapsed(open) {
+  if (open) { state.collapsed = {}; } else {
+    (function walk(node) {
+      node.dirs.forEach(function (d) { state.collapsed[d.path] = true; walk(d); });
+    })(state.tree);
+  }
+  state.nodes = flatNodes();
+  render();
+}
+
 /* ------------------------------------------------------- virtual list */
 
 function expandH() {
   if (state.selPos < 0) return 0;
-  var rows = state.files ? Math.max(state.files.length, 1) : 1;
+  var rows = state.files ? Math.max(state.nodes.length, 1) : 1;
   return rows * FILE_H + 2;
 }
 
@@ -280,21 +376,33 @@ function filesHtml() {
   } else if (!state.files.length) {
     inner = '<div class="file"><span class="dir">No file changes in this commit.</span></div>';
   } else {
-    for (var i = 0; i < state.files.length; i++) {
-      var f = state.files[i];
-      var cut = f.path.lastIndexOf('/');
-      var name = cut < 0 ? f.path : f.path.slice(cut + 1);
-      var dir = cut < 0 ? '' : f.path.slice(0, cut);
-      var num = f.binary ? '<span class="dir">binary</span>' :
-        '<span class="p">+' + f.add + '</span> <span class="m">−' + f.del + '</span>';
-      inner += '<div class="file' + (f.path === state.activeFile ? ' active' : '') +
-        '" data-file="' + esc(f.path) + '" title="' + esc(f.path) + '">' +
-        '<span class="filedot">◇</span>' +
-        '<span class="name">' + esc(name) + '</span>' +
-        '<span class="dir">' + esc(dir) + (f.old ? ' ← ' + esc(f.old) : '') + '</span>' +
-        '<span class="num">' + num + '</span>' +
-        '<span class="st st-' + esc(f.status) + '" title="' + esc(f.status) + '">' +
-        esc(f.status) + '</span></div>';
+    for (var i = 0; i < state.nodes.length; i++) {
+      var n = state.nodes[i];
+      var pad = ' style="padding-left:' + (26 + n.depth * 14) + 'px"';
+      if (n.kind === 'head') {
+        inner += '<div class="file treehead"><span class="tlink" data-all="open">' +
+          'expand all</span>·<span class="tlink" data-all="close">collapse all</span></div>';
+      } else if (n.kind === 'dir') {
+        var shut = state.collapsed[n.node.path];
+        inner += '<div class="file dirnode" data-dir="' + esc(n.node.path) + '"' + pad +
+          ' title="' + esc(n.node.path) + '">' +
+          '<span class="chev">' + (shut ? '▸' : '▾') + '</span>' +
+          '<span class="name">' + esc(n.node.name) + '</span>' +
+          '<span class="num"><span class="p">+' + n.node.add + '</span> <span class="m">−' +
+          n.node.del + '</span></span><span class="st"></span></div>';
+      } else {
+        var f = n.f;
+        var num = f.binary ? '<span class="dir">binary</span>' :
+          '<span class="p">+' + f.add + '</span> <span class="m">−' + f.del + '</span>';
+        inner += '<div class="file' + (f.path === state.activeFile ? ' active' : '') +
+          '" data-file="' + esc(f.path) + '" title="' + esc(f.path) + '"' + pad + '>' +
+          '<span class="filedot">◇</span>' +
+          '<span class="name">' + esc(n.name) + '</span>' +
+          '<span class="dir">' + esc(n.dir) + (f.old ? ' ← ' + esc(f.old) : '') + '</span>' +
+          '<span class="num">' + num + '</span>' +
+          '<span class="st st-' + esc(f.status) + '" title="' + esc(f.status) + '">' +
+          esc(f.status) + '</span></div>';
+      }
     }
   }
   return '<div class="files" style="top:' + top + 'px;height:' + expandH() +
@@ -354,16 +462,17 @@ function select(sha, keepDiff) {
   var token = ++state.reqToken;
   api('/api/commit', { path: state.repo, sha: sha }).then(function (data) {
     if (token !== state.reqToken) return;
-    state.files = data.files;
+    setFiles(data.files);
     state.stats = data;
     computeSelPos();
     render();
     showCommit();
-    /* Open the first file's diff straight away, like GitLens does. */
-    if (!state.activeFile && data.files.length) showDiff(data.files[0].path);
+    /* Open the first listed file's diff straight away, like GitLens does. */
+    var first = state.nodes.filter(function (n) { return n.kind === 'file'; })[0];
+    if (!state.activeFile && first) showDiff(first.f.path);
   }).catch(function (err) {
     if (token !== state.reqToken) return;
-    state.files = [];
+    setFiles([]);
     state.fileErr = err.message;
     render();
   });
@@ -768,6 +877,18 @@ window.addEventListener('resize', render);
 el.rows.addEventListener('click', function (e) {
   var file = e.target.closest ? e.target.closest('.file') : null;
   if (file && file.dataset.file) { showDiff(file.dataset.file); return; }
+  if (file && file.dataset.dir) {
+    var d = file.dataset.dir;
+    if (state.collapsed[d]) delete state.collapsed[d]; else state.collapsed[d] = true;
+    state.nodes = flatNodes();
+    render();
+    return;
+  }
+  if (e.target.dataset && e.target.dataset.all) {
+    setAllCollapsed(e.target.dataset.all === 'open');
+    return;
+  }
+  if (file) return;   // tree header outside its links
   var row = e.target.closest ? e.target.closest('.row') : null;
   if (row && row.dataset.sha) {
     if (row.dataset.sha === state.selSha) {
